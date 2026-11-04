@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# zellij-workspace - session lifecycle for the workspace
+#
+#   zellij-workspace start [--grid 6|8]   reap orphans, then create or attach
+#   zellij-workspace nuke                 kill everything and start clean
+#   zellij-workspace status               health check
+#
+# Grid size defaults to "grid" in projects.json (else 8).
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+ZELLIJ="$(command -v zellij || true)"
+[[ -n "$ZELLIJ" ]] || { echo "Error: zellij not found on PATH" >&2; exit 1; }
+
+PROJECTS_JSON="${WORKSPACE_PROJECTS_JSON:-$HOME/.config/zellij/projects.json}"
+
+# Process names that belong to workspace panes. Used to find orphans (PPID 1)
+# left behind when the terminal dies mid-teardown. Derived from projects.json
+# so custom pane commands are covered.
+pane_procs() {
+    local names="claude"
+    if [[ -f "$PROJECTS_JSON" ]] && command -v jq >/dev/null; then
+        local extra
+        extra="$(jq -r '[.shell // "fish", (.panes // {} | to_entries[] | .value)] | map(select(. != "")) | .[]' "$PROJECTS_JSON" 2>/dev/null | xargs -n1 basename 2>/dev/null | sort -u | tr '\n' '|' | sed 's/|$//')"
+        [[ -n "$extra" ]] && names="$names|$extra"
+    else
+        names="$names|fish|zsh|bash"
+    fi
+    printf '%s' "$names"
+}
+WORKSPACE_PROCS="$(pane_procs)"
+
+GRID_SIZE=""
+
+find_orphans() {
+    ps -eo pid,ppid,comm | awk -v procs="^($WORKSPACE_PROCS)$" '
+        NR > 1 { n = split($3, a, "/"); comm = a[n]
+                 if ($2 == 1 && comm ~ procs) printf "%s ", $1 }'
+}
+
+reap_orphans() {
+    local orphans; orphans="$(find_orphans)"
+    [[ -n "${orphans// /}" ]] || return 0
+    # shellcheck disable=SC2086
+    kill -TERM $orphans 2>/dev/null || true
+    sleep 2
+    for pid in $orphans; do
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    done
+    echo "Cleaned up $(wc -w <<< "$orphans" | tr -d ' ') orphaned processes"
+}
+
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+start_workspace() {
+    reap_orphans
+
+    local sessions
+    sessions="$("$ZELLIJ" list-sessions 2>/dev/null | strip_ansi || true)"
+
+    # Delete dead sessions so the name is free
+    while IFS= read -r line; do
+        if [[ "$line" =~ EXITED ]]; then
+            "$ZELLIJ" delete-session "$(awk '{print $1}' <<< "$line")" 2>/dev/null || true
+        fi
+    done <<< "$sessions"
+
+    # When the terminal window closes it sends SIGHUP. Ignore it so the
+    # zellij server stays up detached and we can reattach later.
+    trap '' HUP
+
+    if grep -q "^$SESSION_NAME" <<< "$sessions" && ! grep -q "^$SESSION_NAME.*EXITED" <<< "$sessions"; then
+        exec "$ZELLIJ" attach "$SESSION_NAME"
+    fi
+    if [[ ! -f "$LAYOUT_FILE" ]]; then
+        echo "Layout $LAYOUT_FILE missing; generating..." >&2
+        "$(dirname "$(readlink "$0" || echo "$0")")/generate-layout.sh" "$GRID_SIZE" >&2 || \
+            generate-layout.sh "$GRID_SIZE" >&2
+    fi
+    exec "$ZELLIJ" --new-session-with-layout "$LAYOUT_FILE" -s "$SESSION_NAME"
+}
+
+nuke_workspace() {
+    "$ZELLIJ" kill-all-sessions --yes 2>/dev/null || true
+    sleep 3
+
+    local pids
+    pids="$(ps -eo pid,ppid,comm | awk -v procs="^($WORKSPACE_PROCS)$" '
+        NR > 1 { n = split($3, a, "/"); if ($2 == 1 && a[n] ~ procs) print $1 }')"
+    if [[ -n "$pids" ]]; then
+        # shellcheck disable=SC2086
+        kill -KILL $pids 2>/dev/null || true
+        echo "Killed $(wc -l <<< "$pids" | tr -d ' ') workspace processes"
+    fi
+
+    pids="$(ps -eo pid,comm | awk 'NR > 1 { n = split($2, a, "/"); if (a[n] == "zellij") print $1 }')"
+    if [[ -n "$pids" ]]; then
+        # shellcheck disable=SC2086
+        kill -KILL $pids 2>/dev/null || true
+        echo "Killed $(wc -l <<< "$pids" | tr -d ' ') zellij server processes"
+    fi
+}
+
+status_workspace() {
+    local sessions state="none" attached="detached"
+    sessions="$("$ZELLIJ" list-sessions 2>/dev/null | strip_ansi || true)"
+    if grep -q "^$SESSION_NAME.*EXITED" <<< "$sessions"; then
+        state="EXITED"
+    elif grep -q "^$SESSION_NAME" <<< "$sessions"; then
+        state="ACTIVE"
+        grep "^$SESSION_NAME" <<< "$sessions" | grep -q "current\|attached" && attached="attached"
+    fi
+    printf "Session:  %s (%s, %s)\n" "$SESSION_NAME" "$state" "$attached"
+    printf "Layout:   %s\n" "$LAYOUT_FILE"
+    printf "Panes:    %s\n" "$(ps -eo ppid,comm | awk -v procs="^($WORKSPACE_PROCS)$" '
+        NR > 1 { n = split($2, a, "/"); if (a[n] ~ procs && $1 != 1) c[a[n]]++ }
+        END { for (k in c) printf "%d %s, ", c[k], k }' | sed 's/, $//')"
+    local orphans; orphans="$(find_orphans)"
+    if [[ -n "${orphans// /}" ]]; then
+        printf "Orphans:  %s  -> run 'zellij-workspace nuke' then relaunch\n" "$(wc -w <<< "$orphans" | tr -d ' ')"
+    else
+        echo "Orphans:  0"
+    fi
+}
+
+usage() {
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+SUBCOMMAND="${1:-}"; shift || true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --grid) GRID_SIZE="${2:-}"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+if [[ -z "$GRID_SIZE" ]]; then
+    GRID_SIZE="$(jq -r '.grid // 8' "$PROJECTS_JSON" 2>/dev/null || echo 8)"
+fi
+[[ "$GRID_SIZE" == "6" || "$GRID_SIZE" == "8" ]] || { echo "grid must be 6 or 8" >&2; exit 1; }
+
+LAYOUT_FILE="$HOME/.config/zellij/layouts/workspace-$GRID_SIZE.kdl"
+SESSION_NAME="workspace-$GRID_SIZE"
+export WORKSPACE_GRID_SIZE="$GRID_SIZE"
+
+case "$SUBCOMMAND" in
+    start)  start_workspace ;;
+    nuke)   nuke_workspace ;;
+    status) status_workspace ;;
+    *)      usage; exit 1 ;;
+esac

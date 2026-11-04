@@ -1,0 +1,8 @@
+[package]
+name = "workspace-switcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zellij-tile = "0.43.1"
+zellij-utils = "0.43.1"

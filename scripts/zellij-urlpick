@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure homebrew and local binaries are on PATH (bash launched by Zellij may not have it)
+export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+
+DUMP_FILE="/tmp/zellij-urlscan.txt"
+
+# Wait for DumpScreen to flush (not sequenced with Run)
+sleep 0.1
+
+if [[ ! -f "$DUMP_FILE" ]]; then
+    echo "No screen dump found"
+    sleep 1
+    exit 0
+fi
+
+# Extract last Claude turn from the screen dump.
+# Claude Code layout on screen:
+#   [older content]
+#   ❯ user input        ← last user prompt
+#   ⎿ [attachments]     ← optional
+#   ⏺ response text     ← Claude's response (what we want)
+#   ────────────────     ← separator
+#   ❯                   ← current empty prompt
+#   ────────────────     ← separator
+#   [status bar]         ← context/cost info
+
+# Strategy: find the first ──── separator (above input area), then within
+# the content above it, find the last ❯ line (user's message that triggered
+# the response). Everything between that ❯ line and the separator is the
+# Claude response. Skip the ❯ line itself and any ⎿ attachment lines.
+
+first_sep=$(grep -n '────' "$DUMP_FILE" | head -1 | cut -d: -f1 || true)
+
+if [[ -n "$first_sep" && "$first_sep" -gt 1 ]]; then
+    # Get content above separator, find last ❯ prompt within it
+    above_sep=$(head -n "$((first_sep - 1))" "$DUMP_FILE")
+    last_prompt=$(echo "$above_sep" | grep -n '^❯' | tail -1 | cut -d: -f1 || true)
+
+    if [[ -n "$last_prompt" ]]; then
+        # Extract from after the ❯ line, skip wrapped user input by finding first ⏺ marker
+        after_prompt=$(echo "$above_sep" | tail -n +"$((last_prompt + 1))")
+        first_bullet=$(echo "$after_prompt" | grep -n '⏺' | head -1 | cut -d: -f1 || true)
+        if [[ -n "$first_bullet" ]]; then
+            last_turn=$(echo "$after_prompt" | tail -n +"$first_bullet" | grep -v '^ *⎿' | sed '/^[[:space:]]*$/{ 1d; $d; }')
+        else
+            last_turn=$(echo "$after_prompt" | grep -v '^ *⎿' | sed '/^[[:space:]]*$/{ 1d; $d; }')
+        fi
+    else
+        # No ❯ found above separator — use all content above it
+        last_turn=$(echo "$above_sep" | sed '/^[[:space:]]*$/{ 1d; $d; }')
+    fi
+else
+    last_turn=""
+fi
+
+# Branch A: Last turn has URLs — copy text to clipboard AND open all URLs
+if [[ -n "$last_turn" ]] && echo "$last_turn" | grep -qE 'https?://'; then
+    printf '%s' "$last_turn" | pbcopy
+    urls=$(echo "$last_turn" | grep -oE 'https?://[^ )>"]+' | sed 's/[.,;:!?]$//')
+    url_count=$(echo "$urls" | wc -l | tr -d ' ')
+    while read -r url; do
+        open "$url" 2>/dev/null
+    done <<< "$urls"
+    echo "Copied to clipboard + opened $url_count URL(s)"
+    sleep 1
+    exit 0
+fi
+
+# Branch B: Last turn exists but no URLs — copy to clipboard
+if [[ -n "$last_turn" ]]; then
+    printf '%s' "$last_turn" | pbcopy
+    echo "Copied to clipboard"
+    sleep 1
+    exit 0
+fi
+
+# Branch C: No Claude turn found — fall back to full-screen URL check
+if grep -qE 'https?://' "$DUMP_FILE"; then
+    if ! command -v urlscan &>/dev/null; then
+        echo "urlscan not found. Install with: uv tool install urlscan"
+        sleep 2
+        exit 1
+    fi
+    exec urlscan "$DUMP_FILE"
+fi
+
+# Branch D: Nothing useful
+echo "No URLs or Claude output found"
+sleep 1
+exit 0

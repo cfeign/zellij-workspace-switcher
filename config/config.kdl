@@ -1,0 +1,219 @@
+// Zellij configuration for the multi-project workspace.
+// Symlinked to ~/.config/zellij/config.kdl by setup.sh.
+//
+// Keybinding syntax: https://zellij.dev/documentation/keybindings
+// Actions reference:  https://zellij.dev/documentation/keybindings-possible-actions
+//
+// Scripts are launched through `bash -c` so $HOME expands at runtime; KDL
+// itself has no variable expansion. setup.sh links the scripts into
+// ~/.local/bin, which is why that path appears below.
+// On macOS, Alt bindings need `macos-option-as-alt = true` in Ghostty
+// (or the equivalent in your terminal). See config/ghostty/config.
+
+keybinds clear-defaults=true {
+    // Essential locked mode toggle
+    shared_except "locked" {
+        bind "Ctrl g" { SwitchToMode "Locked"; }
+    }
+    locked {
+        bind "Ctrl g" { SwitchToMode "Normal"; }
+    }
+
+    // Main navigation - works in all modes except locked
+    shared_except "locked" {
+        // Swap layout cycling - Alt+o and Alt+i (prev/next)
+        bind "Alt o" { PreviousSwapLayout; }
+        bind "Alt i" { NextSwapLayout; }
+
+        // Project picker: assign a project to a slot, pick sounds/fonts
+        bind "Alt s" {
+            Run "bash" "-c" "$HOME/.local/bin/zellij-swap" {
+                floating true
+                close_on_exit true
+            }
+        }
+
+        // Fullscreen the focused pane (toggle)
+        bind "Alt f" { ToggleFocusFullscreen; }
+
+        // Pane navigation with Alt+hjkl
+        bind "Alt h" { MoveFocus "Left"; }
+        bind "Alt j" { MoveFocus "Down"; }
+        bind "Alt k" { MoveFocus "Up"; }
+        bind "Alt l" { MoveFocus "Right"; }
+
+        // Smart picker: copies Claude's last reply and opens any URLs in it;
+        // falls back to urlscan over the whole screen
+        bind "Alt u" {
+            DumpScreen "/tmp/zellij-urlscan.txt";
+            Run "bash" "-c" "$HOME/.local/bin/zellij-urlpick" {
+                floating true
+                close_on_exit true
+            }
+        }
+
+        // Quick-focus: in grid mode = jump to slot N's claude pane (stay in grid);
+        // in focus mode = jump to pane 1 claude, 2 git, 3 issues, 4 test, 5 adhoc
+        bind "Alt Shift 1" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 1"
+            }
+        }
+        bind "Alt Shift 2" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 2"
+            }
+        }
+        bind "Alt Shift 3" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 3"
+            }
+        }
+        bind "Alt Shift 4" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 4"
+            }
+        }
+        bind "Alt Shift 5" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 5"
+            }
+        }
+        bind "Alt Shift 6" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 6"
+            }
+        }
+        bind "Alt Shift 7" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 7"
+            }
+        }
+        bind "Alt Shift 8" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "quick-focus 8"
+            }
+        }
+
+        // Resize mode
+        bind "Ctrl p" { SwitchToMode "Resize"; }
+
+        // Workspace switcher: Alt+0 grid of all claude panes, Alt+1-8 focus a slot,
+        // Alt+9 rescan (reset plugin state if panes get out of sync)
+        bind "Alt 0" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "claude-only"
+            }
+        }
+        bind "Alt 9" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "rescan"
+            }
+        }
+        bind "Alt 1" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 1"
+            }
+        }
+        bind "Alt 2" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 2"
+            }
+        }
+        bind "Alt 3" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 3"
+            }
+        }
+        bind "Alt 4" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 4"
+            }
+        }
+        bind "Alt 5" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 5"
+            }
+        }
+        bind "Alt 6" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 6"
+            }
+        }
+        bind "Alt 7" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 7"
+            }
+        }
+        bind "Alt 8" {
+            MessagePlugin "file:~/.config/zellij/plugins/workspace_switcher.wasm" {
+                name "switch"
+                payload "focus 8"
+            }
+        }
+    }
+
+    resize {
+        bind "h" "Left" { Resize "Increase Left"; }
+        bind "j" "Down" { Resize "Increase Down"; }
+        bind "k" "Up" { Resize "Increase Up"; }
+        bind "l" "Right" { Resize "Increase Right"; }
+        bind "H" { Resize "Decrease Left"; }
+        bind "J" { Resize "Decrease Down"; }
+        bind "K" { Resize "Decrease Up"; }
+        bind "L" { Resize "Decrease Right"; }
+        bind "Esc" { SwitchToMode "Normal"; }
+        bind "Enter" { SwitchToMode "Normal"; }
+    }
+
+    normal {
+        // Pane management
+        bind "Ctrl n" { NewPane; }
+        bind "Ctrl x" { CloseFocus; }
+        bind "Ctrl q" { Quit; }
+    }
+}
+
+// UI settings
+pane_frames true            // titles on frames are how you tell slots apart
+default_shell "fish"        // shell for panes opened by hand (Ctrl+n); set to zsh/bash if you prefer
+
+// Theme: only frame_highlight is customised, for the "Claude is waiting on you"
+// highlight in grid mode (blue instead of Zellij's orange). Add a full theme or
+// pick a built-in one with `theme "<name>"`: https://zellij.dev/documentation/themes
+themes {
+    workspace {
+        frame_highlight {
+            base 80 140 255
+            background 0
+            emphasis_0 120 170 255
+            emphasis_1 80 140 255
+            emphasis_2 80 140 255
+            emphasis_3 80 140 255
+        }
+    }
+}
+theme "workspace"
+
+// Don't serialise sessions to disk: the layout is regenerated from projects.json
+// and the server stays alive across terminal restarts via trap '' HUP in
+// zellij-workspace. Detach (not quit) when the terminal window closes.
+session_serialization false
+on_force_close "detach"

@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to ~/.config/zellij/projects.json. Paths may start with ~.",
+
+  "grid": 8,
+  "projects_root": "~/code",
+  "shell": "fish",
+
+  "panes": {
+    "claude": "claude-workspace",
+    "git": "lazygit",
+    "issues": "",
+    "test": "",
+    "adhoc": ""
+  },
+
+  "projects": [
+    { "name": "my-app",      "path": "~/code/my-app" },
+    { "name": "other-thing", "path": "~/code/other-thing" }
+  ],
+
+  "slots": {
+    "1": "my-app",
+    "2": "other-thing"
+  }
+}

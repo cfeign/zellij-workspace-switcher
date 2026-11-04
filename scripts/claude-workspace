@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# claude-workspace - how the claude pane launches Claude Code.
+#
+# Resumes the previous conversation for this directory when one exists, and
+# runs through direnv when the project has an .envrc. Edit ARGS to taste
+# (e.g. drop --permission-mode auto if you prefer to approve every tool call).
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+
+CLAUDE="$(command -v claude || true)"
+if [[ -z "$CLAUDE" ]]; then
+    echo "claude-workspace: 'claude' not found on PATH. Install Claude Code first." >&2
+    exec "${SHELL:-sh}"
+fi
+
+ARGS=(--permission-mode auto)
+
+# Only pass --continue when a resumable transcript actually exists; otherwise
+# claude exits with "No conversation found to continue" and the pane dies.
+# Claude Code stores transcripts under a directory derived from the cwd.
+PROJECT_DIR="$HOME/.claude/projects/$(pwd | tr '/.' '--')"
+if compgen -G "$PROJECT_DIR"/*.jsonl > /dev/null 2>&1; then
+    ARGS+=(--continue)
+fi
+
+DIRENV="$(command -v direnv || true)"
+if [[ -f ".envrc" && -n "$DIRENV" ]]; then
+    exec "$DIRENV" exec . "$CLAUDE" "${ARGS[@]}"
+fi
+exec "$CLAUDE" "${ARGS[@]}"

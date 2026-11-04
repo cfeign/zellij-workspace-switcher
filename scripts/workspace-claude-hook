@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# workspace-claude-hook - Claude Code hook that drives the "needs attention"
+# highlight on grid cells.
+#
+# The plugin polls /tmp/claude-active/ every 2s. A file named slot-N there
+# means slot N's Claude has finished a turn and is waiting on you; the plugin
+# highlights that cell's frame. The marker is removed when you send the next
+# prompt.
+#
+#   workspace-claude-hook stop      called from the Stop hook: mark this slot
+#   workspace-claude-hook prompt    called from UserPromptSubmit: clear it
+#
+# Wire it up in ~/.claude/settings.json (see README "Attention highlighting").
+# The slot is found by matching the current directory to projects.json.
+set -euo pipefail
+
+MARKER_DIR="/tmp/claude-active"
+PROJECTS_JSON="${WORKSPACE_PROJECTS_JSON:-$HOME/.config/zellij/projects.json}"
+
+[[ -f "$PROJECTS_JSON" ]] || exit 0
+command -v jq >/dev/null || exit 0
+
+cwd="$(pwd -P)"
+slot="$(jq -r --arg cwd "$cwd" --arg home "$HOME" '
+    (.projects // []) | map({name, path: (.path | sub("^~"; $home))}) as $p
+    | ($p[] | select(.path == $cwd) | .name) as $n
+    | (.slots // {}) | to_entries[] | select(.value == $n) | .key' "$PROJECTS_JSON" 2>/dev/null | head -1)"
+
+[[ -n "$slot" ]] || exit 0
+
+case "${1:-}" in
+    stop)   mkdir -p "$MARKER_DIR"; touch "$MARKER_DIR/slot-$slot" ;;
+    prompt) rm -f "$MARKER_DIR/slot-$slot" ;;
+    *)      echo "usage: workspace-claude-hook stop|prompt" >&2; exit 1 ;;
+esac

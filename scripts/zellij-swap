@@ -1,0 +1,440 @@
+#!/usr/bin/env bash
+# zellij-swap - TUI for swapping projects into slots (loops until ESC/Ctrl+C)
+
+set -euo pipefail
+
+# Ensure homebrew and local binaries are on PATH (bash launched by Zellij may not have it)
+export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"
+
+CONFIG_FILE="${WORKSPACE_PROJECTS_JSON:-$HOME/.config/zellij/projects.json}"
+MAX_SLOTS="${WORKSPACE_GRID_SIZE:-$(jq -r '.grid // 8' "$CONFIG_FILE" 2>/dev/null || echo 8)}"
+
+# Where to look for unregistered projects ("projects_root" in projects.json)
+PROJECTS_ROOT="$(jq -r '.projects_root // "~/code"' "$CONFIG_FILE" 2>/dev/null || echo "~/code")"
+PROJECTS_ROOT="${PROJECTS_ROOT/#\~/$HOME}"
+
+# This script is symlinked into ~/.local/bin; find the repo it lives in
+SELF="$0"; while [[ -L "$SELF" ]]; do SELF="$(readlink "$SELF")"; done
+REPO_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+GENERATE_LAYOUT="$REPO_DIR/scripts/generate-layout.sh"
+
+# Check dependencies
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is required. Install with: brew install jq"
+    exit 1
+fi
+
+if ! command -v fzf &> /dev/null; then
+    echo "Error: fzf is required. Install with: brew install fzf"
+    exit 1
+fi
+
+# Load config
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "Error: Config not found at $CONFIG_FILE"
+    exit 1
+fi
+
+# Collect all known project paths for dedup
+known_paths() {
+    jq -r '.projects[].path' "$CONFIG_FILE" 2>/dev/null
+}
+
+# Build display list: slots, registered unslotted, discoverable from ~/scripts
+build_list() {
+    # Slotted projects
+    for i in $(seq 1 "$MAX_SLOTS"); do
+        proj=$(jq -r ".slots[\"$i\"] // \"null\"" "$CONFIG_FILE")
+        if [[ "$proj" != "null" ]]; then
+            path=$(jq -r ".projects[] | select(.name == \"$proj\") | .path" "$CONFIG_FILE")
+            if [[ -n "$path" && -d "$path" ]]; then
+                branch=$(cd "$path" 2>/dev/null && git branch --show-current 2>/dev/null || echo "?")
+            else
+                branch="?"
+            fi
+            sound=""
+            local settings_file="$path/.claude/settings.json"
+            if [[ -f "$settings_file" ]]; then
+                local afplay_cmd
+                afplay_cmd=$(jq -r '.hooks.Stop[]?.hooks[]? | select(.type == "command") | .command // empty' "$settings_file" 2>/dev/null | grep -m1 'afplay' || true)
+                if [[ -n "$afplay_cmd" ]]; then
+                    # Extract clean name: prefer claude-sounds/ path, fallback to filename
+                    local sname
+                    sname=$(echo "$afplay_cmd" | sed -n "s/.*claude-sounds\\/\\([^.']*\\).*/\\1/p")
+                    if [[ -z "$sname" ]]; then
+                        sname=$(echo "$afplay_cmd" | sed -n "s/.*\\/\\([^/']*\\)'.*/\\1/p" | sed 's/-Tonepaper//' | sed 's/^[- _]*//' | sed 's/\..*//')
+                    fi
+                    sound="♪ ${sname:-?}"
+                fi
+            fi
+            printf "[%d] %-25s %-12s %s\n" "$i" "$proj" "$branch" "$sound"
+        else
+            printf "[%d] %-25s\n" "$i" "(empty)"
+        fi
+    done
+
+    # Registered but unslotted projects
+    jq -r '.projects[] | .name' "$CONFIG_FILE" 2>/dev/null | while read -r name; do
+        in_slot=$(jq -r ".slots | to_entries[] | select(.value == \"$name\") | .key" "$CONFIG_FILE" | head -1)
+        if [[ -z "$in_slot" ]] || [[ ! "$in_slot" =~ ^[0-9]+$ ]] || (( in_slot > MAX_SLOTS )); then
+            path=$(jq -r ".projects[] | select(.name == \"$name\") | .path" "$CONFIG_FILE")
+            if [[ -n "$path" && -d "$path" ]]; then
+                branch=$(cd "$path" 2>/dev/null && git branch --show-current 2>/dev/null || echo "?")
+            else
+                branch="?"
+            fi
+            printf "[ ] %-25s %s\n" "$name" "$branch"
+        fi
+    done
+
+    # Discoverable dirs from projects_root (20 most recently modified, not already registered)
+    local known
+    known=$(known_paths | sed "s|^~|$HOME|")
+    ls -dt "$PROJECTS_ROOT"/*/ 2>/dev/null | head -20 | while read -r dir; do
+        dir="${dir%/}"  # strip trailing slash
+        if ! echo "$known" | grep -qxF "$dir"; then
+            local name
+            name=$(basename "$dir")
+            printf "[+] %-25s %s\n" "$name" "$dir"
+        fi
+    done
+}
+
+# --- Sound picker functions ---
+
+pick_sound() {
+    local proj_name="$1"
+    local proj_path="$2"
+    local sounds_dir="$HOME/.config/claude-sounds"
+
+    if [[ ! -d "$sounds_dir" ]] || [[ -z "$(ls "$sounds_dir"/*.mp3 2>/dev/null)" ]]; then
+        echo "No sounds found in $sounds_dir"
+        sleep 1
+        return
+    fi
+
+    # Detect current sound
+    local current_sound=""
+    local settings_file="$proj_path/.claude/settings.json"
+    if [[ -f "$settings_file" ]]; then
+        local afplay_cmd
+        afplay_cmd=$(jq -r '.hooks.Stop[]?.hooks[]? | select(.type == "command") | .command // empty' "$settings_file" 2>/dev/null | grep -m1 'afplay' || true)
+        if [[ -n "$afplay_cmd" ]]; then
+            current_sound=$(echo "$afplay_cmd" | sed "s/.*claude-sounds\\///" | sed 's/\..*//')
+        fi
+    fi
+
+    # Build sound list
+    local list=""
+    for f in "$sounds_dir"/*.mp3; do
+        local name
+        name=$(basename "$f" .mp3)
+        if [[ "$name" == "$current_sound" ]]; then
+            list+="$name  (current)"$'\n'
+        else
+            list+="$name"$'\n'
+        fi
+    done
+    list+="[none] - remove sound"
+
+    # fzf with auto-preview that plays audio on cursor move
+    local choice
+    choice=$(echo "$list" | fzf \
+        --header="Stop-hook sound for: $proj_name" \
+        --bind "focus:execute-silent(pkill -f 'afplay.*claude-sounds' 2>/dev/null; afplay '$sounds_dir/{1}.mp3' 2>/dev/null &)" \
+        --no-preview \
+        --border=rounded \
+        --margin=1 \
+        --padding=1 \
+        --height=100%) || { pkill -f 'afplay.*claude-sounds' 2>/dev/null; return; }
+
+    # Kill any lingering preview
+    pkill -f 'afplay.*claude-sounds' 2>/dev/null
+
+    if [[ -z "$choice" ]]; then
+        return
+    fi
+
+    local sound_name
+    sound_name=$(echo "$choice" | awk '{print $1}')
+
+    if [[ "$sound_name" == "[none]" ]]; then
+        remove_stop_sound "$proj_path"
+        echo "Removed stop-hook sound for $proj_name"
+    else
+        set_stop_sound "$proj_path" "$sound_name"
+        echo "Set stop-hook sound for $proj_name → $sound_name"
+    fi
+    sleep 0.5
+}
+
+set_stop_sound() {
+    local proj_path="$1"
+    local sound_name="$2"
+    local settings_file="$proj_path/.claude/settings.json"
+    local sound_path="$HOME/.config/claude-sounds/${sound_name}.mp3"
+
+    mkdir -p "$proj_path/.claude"
+
+    if [[ ! -f "$settings_file" ]] || [[ ! -s "$settings_file" ]]; then
+        cat > "$settings_file" << ENDJSON
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "afplay '$sound_path'"
+          }
+        ]
+      }
+    ]
+  }
+}
+ENDJSON
+        return
+    fi
+
+    # File exists — upsert the Stop hook (remove existing afplay, add new)
+    local tmp
+    tmp=$(mktemp)
+    jq --arg cmd "afplay '$sound_path'" '
+        .hooks //= {} |
+        .hooks.Stop = [(.hooks.Stop // [])[] | select(.hooks | any(.command | test("afplay")) | not)] |
+        .hooks.Stop += [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
+    ' "$settings_file" > "$tmp" && mv "$tmp" "$settings_file"
+}
+
+remove_stop_sound() {
+    local proj_path="$1"
+    local settings_file="$proj_path/.claude/settings.json"
+
+    if [[ ! -f "$settings_file" ]]; then
+        return
+    fi
+
+    local tmp
+    tmp=$(mktemp)
+    jq '
+        .hooks.Stop = [(.hooks.Stop // [])[] | select(.hooks | any(.command | test("afplay")) | not)] |
+        if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end |
+        if (.hooks | length) == 0 then del(.hooks) else . end
+    ' "$settings_file" > "$tmp" && mv "$tmp" "$settings_file"
+}
+
+# --- Font picker functions ---
+
+pick_font() {
+    local ghostty_config="$HOME/.config/ghostty/config"
+    local current_font=""
+
+    if [[ -f "$ghostty_config" ]]; then
+        current_font=$(grep -m1 '^font-family' "$ghostty_config" 2>/dev/null | sed 's/font-family *= *//' | sed 's/"//g' || true)
+    fi
+
+    # List monospace fonts, excluding symbol/emoji-only families
+    local fonts
+    fonts=$(fc-list :spacing=100 family 2>/dev/null \
+        | sed 's/,.*//g' | sort -u | grep -v '^\.' \
+        | grep -viE 'emoji|symbols|wingdings|webdings|dingbat')
+
+    local list=""
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        if [[ "$name" == "$current_font" ]]; then
+            list+="$name  (current)"$'\n'
+        else
+            list+="$name"$'\n'
+        fi
+    done <<< "$fonts"
+
+    if [[ -z "$current_font" ]]; then
+        list="[default]  (current)"$'\n'"$list"
+    else
+        list="[default] - Ghostty built-in"$'\n'"$list"
+    fi
+
+    local choice
+    choice=$(echo "$list" | fzf \
+        --header="Terminal font (applies to all Ghostty windows)" \
+        --no-preview \
+        --border=rounded \
+        --margin=1 \
+        --padding=1 \
+        --height=100%) || return
+
+    if [[ -z "$choice" ]]; then
+        return
+    fi
+
+    local font_name
+    font_name=$(echo "$choice" | sed 's/  *(current)$//' | awk '{$1=$1};1')
+
+    if [[ "$font_name" == "[default]"* ]]; then
+        # Remove font-family line
+        if [[ -f "$ghostty_config" ]]; then
+            sed -i '' '/^font-family/d' "$ghostty_config" || true
+        fi
+        echo "Reset to Ghostty default font"
+    else
+        if [[ -f "$ghostty_config" ]] && grep -q '^font-family' "$ghostty_config" 2>/dev/null; then
+            sed -i '' "s/^font-family.*$/font-family = $font_name/" "$ghostty_config"
+        else
+            mkdir -p "$(dirname "$ghostty_config")"
+            echo "font-family = $font_name" >> "$ghostty_config"
+        fi
+        echo "Font → $font_name"
+    fi
+
+    # Trigger Ghostty config reload
+    osascript -e 'tell application "System Events" to tell process "Ghostty" to click menu item "Reload Configuration" of menu "Ghostty" of menu bar 1' 2>/dev/null || true
+    sleep 0.5
+}
+
+# Main loop - keep showing picker until ESC/Ctrl+C
+while true; do
+    EXPECT_KEYS="$(seq -s, 1 "$MAX_SLOTS"),S,N,F"
+    selected=$(build_list | fzf --header="1-${MAX_SLOTS}: assign slot | S: Sound | N: New | F: Font | ESC: exit" \
+        --expect="$EXPECT_KEYS" \
+        --no-preview \
+        --height=100% \
+        --border=rounded \
+        --margin=1 \
+        --padding=1) || exit 0  # ESC/Ctrl+C exits fzf with non-zero
+
+    if [[ -z "$selected" ]]; then
+        exit 0
+    fi
+
+    # Parse selection
+    key=$(echo "$selected" | head -1)
+    line=$(echo "$selected" | tail -1)
+
+    # Detect line type and extract project name
+    if [[ "$line" == "[+]"* ]]; then
+        # Discoverable dir — extract name and path
+        proj_name=$(echo "$line" | sed 's/^\[+\] *//' | awk '{print $1}')
+        proj_path=$(echo "$line" | sed 's/^\[+\] *//' | awk '{print $2}')
+    else
+        # Existing project — extract name from [N] or [ ] prefix
+        proj_name=$(echo "$line" | sed 's/^\[[0-9 ]\] *//' | awk '{print $1}')
+        proj_path=""
+    fi
+
+    if [[ -z "$key" || -z "$proj_name" ]]; then
+        echo "No slot number pressed (use 1-${MAX_SLOTS})"
+        sleep 1
+        continue
+    fi
+
+    if [[ "$proj_name" == "(empty)" ]]; then
+        echo "That slot is empty - select a project first, then press 1-8"
+        sleep 1
+        continue
+    fi
+
+    # New project
+    if [[ "$key" == "N" ]]; then
+        echo -n "New project name: "
+        read -r new_name
+        if [[ -z "$new_name" ]]; then
+            echo "No name given"
+            sleep 1
+            continue
+        fi
+        proj_path="$PROJECTS_ROOT/$new_name"
+        if [[ -d "$proj_path" ]]; then
+            echo "$proj_path already exists"
+            sleep 1
+            continue
+        fi
+        mkdir -p "$proj_path"
+        proj_name="$new_name"
+        # Register in projects.json
+        jq --arg name "$proj_name" --arg path "$proj_path" \
+            '.projects += [{"name": $name, "path": $path}]' \
+            "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        echo "Created $proj_path"
+        # Ask which slot
+        echo -n "Assign to slot (1-${MAX_SLOTS}): "
+        read -r key
+        if [[ ! "$key" =~ ^[1-8]$ ]] || [[ "$key" -gt "$MAX_SLOTS" ]]; then
+            echo "Invalid slot"
+            sleep 1
+            continue
+        fi
+        # Update slot and swap
+        jq ".slots[\"$key\"] = \"$proj_name\"" "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        echo "Assigned $proj_name → slot $key"
+        zellij pipe "swap-slot $key $proj_name $proj_path"
+        [[ -x "$GENERATE_LAYOUT" ]] && "$GENERATE_LAYOUT" "$MAX_SLOTS" > /dev/null 2>&1
+        # Refresh grid after swap — new panes take time to spawn
+        sleep 2
+        zellij pipe "rescan"
+        sleep 0.3
+        exit 0
+    fi
+
+    # Font picker
+    if [[ "$key" == "F" ]]; then
+        pick_font
+        continue
+    fi
+
+    # Sound picker
+    if [[ "$key" == "S" ]]; then
+        # Resolve project path
+        sound_proj_path="$proj_path"
+        if [[ -z "$sound_proj_path" ]]; then
+            sound_proj_path=$(jq -r --arg name "$proj_name" '.projects[] | select(.name == $name) | .path' "$CONFIG_FILE")
+        fi
+        if [[ -n "$sound_proj_path" && "$sound_proj_path" != "null" ]]; then
+            pick_sound "$proj_name" "$sound_proj_path"
+        else
+            echo "Could not find path for $proj_name"
+            sleep 1
+        fi
+        continue
+    fi
+
+    # If discoverable dir, register it first
+    if [[ "$line" == "[+]"* && -n "$proj_path" ]]; then
+        jq --arg name "$proj_name" --arg path "$proj_path" \
+            '.projects += [{"name": $name, "path": $path}]' \
+            "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        echo "Registered $proj_name"
+    fi
+
+    # Update slot in projects.json
+    jq ".slots[\"$key\"] = \"$proj_name\"" "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    # Get project path (if not already set from discoverable dir)
+    if [[ -z "$proj_path" ]]; then
+        proj_path=$(jq -r --arg name "$proj_name" '.projects[] | select(.name == $name) | .path' "$CONFIG_FILE")
+        proj_path="${proj_path/#\~/$HOME}"
+    fi
+
+    if [[ -z "$proj_path" || "$proj_path" == "null" ]]; then
+        echo "Error: Could not find path for project $proj_name"
+        sleep 1
+        continue
+    fi
+
+    echo "Assigned $proj_name → slot $key"
+
+    # Use pipe to tell workspace-switcher plugin to handle slot swap
+    zellij pipe "swap-slot $key $proj_name $proj_path"
+
+    # Regenerate layout for next restart consistency
+    [[ -x "$GENERATE_LAYOUT" ]] && "$GENERATE_LAYOUT" "$MAX_SLOTS" > /dev/null 2>&1
+
+    # Refresh grid after swap — new panes take time to spawn, so wait
+    # longer then rescan (resets plugin state + re-applies grid mode)
+    sleep 2
+    zellij pipe "rescan"
+
+    sleep 0.3
+    exit 0
+done
