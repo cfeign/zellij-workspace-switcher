@@ -17,7 +17,7 @@ Built for macOS with Ghostty and fish, but nothing requires them: the shell and 
 
 ## Install
 
-Dependencies: [zellij](https://zellij.dev), [jq](https://jqlang.github.io/jq), [fzf](https://github.com/junegunn/fzf), [Rust](https://rustup.rs) (to build the plugin), and [Claude Code](https://claude.com/claude-code).
+Dependencies: [zellij](https://zellij.dev) 0.46 (the plugin builds against that version; see `Cargo.toml`), [jq](https://jqlang.github.io/jq), [fzf](https://github.com/junegunn/fzf), [Rust](https://rustup.rs) (to build the plugin), and [Claude Code](https://claude.com/claude-code).
 
 ```sh
 brew install zellij jq fzf

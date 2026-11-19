@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use zellij_tile::prelude::*;
-use zellij_utils::input::layout::SplitSize;
+use zellij_utils::input::layout::PercentOrFixed;
 
 /// Marker directory polled for active-Claude highlighting (see scripts/workspace-claude-hook)
 const MARKER_DIR: &str = "/tmp/claude-active";
@@ -380,7 +380,7 @@ impl State {
                             }
                         };
                         if let Some(id) = pane_id {
-                            focus_pane_with_id(id, false);
+                            focus_pane_with_id(id, false, false);
                             eprintln!("[ws] Focused {} pane in slot {}", pane_type, slot);
                         } else {
                             eprintln!("[ws] Pane {} not found in slot {}", pane_type, slot);
@@ -397,7 +397,7 @@ impl State {
                             // Focus grid cell N without leaving grid
                             if let Some(slot_panes) = self.slots.get(&n) {
                                 if let Some(id) = slot_panes.claude {
-                                    focus_pane_with_id(id, false);
+                                    focus_pane_with_id(id, false, false);
                                     eprintln!("[ws] Quick-focus slot {} (grid)", n);
                                 }
                             }
@@ -417,7 +417,7 @@ impl State {
                                 None
                             };
                             if let Some(id) = pane_id {
-                                focus_pane_with_id(id, false);
+                                focus_pane_with_id(id, false, false);
                                 eprintln!("[ws] Quick-focus pane {} in slot {} (focus)", n, slot);
                             }
                         }
@@ -492,7 +492,7 @@ impl State {
         // Show all claude panes
         for slot_panes in self.slots.values() {
             if let Some(id) = slot_panes.claude {
-                show_pane_with_id(id, false);
+                show_pane_with_id(id, false, true);
             }
         }
 
@@ -552,7 +552,7 @@ impl State {
 
         // Show target claude pane (but don't focus yet)
         if let Some(id) = target_panes.claude {
-            show_pane_with_id(id, false);
+            show_pane_with_id(id, false, true);
         }
 
         // Hide all other slots' tools
@@ -566,12 +566,12 @@ impl State {
 
         // Show target slot's tools
         for id in target_panes.tool_ids() {
-            show_pane_with_id(id, false);
+            show_pane_with_id(id, false, true);
         }
 
         // Focus the claude pane after all visibility changes
         if let Some(id) = target_panes.claude {
-            focus_pane_with_id(id, false);
+            focus_pane_with_id(id, false, false);
         }
 
         self.current_mode = Some(Mode::Focus(slot));
@@ -636,11 +636,12 @@ fn tool_coords(t: &PaneType) -> PaneCoords {
 
 fn coords_to_floating(coords: &PaneCoords) -> FloatingPaneCoordinates {
     FloatingPaneCoordinates {
-        x: Some(SplitSize::Percent(coords.x as usize)),
-        y: Some(SplitSize::Percent(coords.y as usize)),
-        width: Some(SplitSize::Percent(coords.width as usize)),
-        height: Some(SplitSize::Percent(coords.height as usize)),
+        x: Some(PercentOrFixed::Percent(coords.x as usize)),
+        y: Some(PercentOrFixed::Percent(coords.y as usize)),
+        width: Some(PercentOrFixed::Percent(coords.width as usize)),
+        height: Some(PercentOrFixed::Percent(coords.height as usize)),
         pinned: None,
+        ..Default::default()
     }
 }
 
@@ -717,8 +718,9 @@ impl State {
         );
 
         // Open one pane per type, in the order the layout generator uses.
-        // Each gets the command configured for its type and a queued rename
-        // so the next PaneUpdate can stamp the naming convention onto it.
+        // Each gets the command configured for its type. Zellij returns the new
+        // pane id, so the naming convention is stamped on at once; the rename
+        // queue is only the fallback for when no id comes back.
         for t in PaneType::ALL.iter() {
             let name = match t {
                 PaneType::Claude => format!("claude-{}-{}", slot, project_name),
@@ -730,20 +732,27 @@ impl State {
             };
             let mut ctx = BTreeMap::new();
             ctx.insert("name".to_string(), name.clone());
-            open_command_pane_floating(
+            let opened = open_command_pane_floating(
                 CommandToRun {
                     path: PathBuf::from(self.commands.for_type(t)),
                     args: vec![],
                     cwd: Some(cwd.clone()),
+                    ..Default::default()
                 },
                 Some(coords_to_floating(&coords)),
                 ctx,
             );
-            self.pending_renames.push(PendingRename {
-                desired_name: name,
-                slot,
-                pane_type: t.clone(),
-            });
+            match opened {
+                Some(PaneId::Terminal(id)) => {
+                    eprintln!("[ws] Naming new pane {} as {}", id, name);
+                    rename_terminal_pane(id, &name);
+                }
+                _ => self.pending_renames.push(PendingRename {
+                    desired_name: name,
+                    slot,
+                    pane_type: t.clone(),
+                }),
+            }
         }
 
         // Remove old slot data - will be rebuilt on next PaneUpdate

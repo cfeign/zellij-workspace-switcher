@@ -43,7 +43,8 @@ Shell scripts: `bash -n scripts/*` for syntax. `generate-layout.sh` can be run a
 
 ## Gotchas
 
-- Zellij titles a newly opened command pane after its command. The plugin's `pending_renames` queue matches on the command basename to re-title it. If you change what a pane runs, the match still works because the basename comes from the same config.
+- Zellij titles a newly opened command pane after its command. `swap_slot` renames each new pane by the id that `open_command_pane_floating` returns. The `pending_renames` queue (match on the command basename) is only the fallback for when no id comes back.
+- The plugin builds against one Zellij version (`zellij-tile` / `zellij-utils` in `Cargo.toml`, now 0.46.0). The plugin API changes between Zellij releases, so set these to the installed `zellij --version` and rebuild after a Zellij upgrade. Keep one `zellij` on PATH: a client of a different version cannot see a running session, and `zellij pipe` then fails with "There is no active session!".
 - `quick-focus` numbering in focus mode is 1 claude, 2 git, 3 issues, 4 test, 5 adhoc (the private version skipped 4).
 - macOS terminals must send Option as Alt or none of the bindings fire. This is a terminal setting, not a Zellij one.
 - `docs/history/` is the original author's design trail. Pane names in there are the old ones; see `docs/history/README.md` for the mapping.

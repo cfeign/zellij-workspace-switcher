@@ -26,7 +26,7 @@ A `zellij-tile` plugin with no UI. It subscribes to `PaneUpdate`, `Timer`, and `
 - `slots`: slot number → `SlotPanes { claude, git, issues, test, adhoc }`, rebuilt from `all_panes`
 - `current_mode`: `Grid` or `Focus(slot)`
 - `commands`: the command path for each pane type, read once from the layout's plugin configuration in `load()`
-- `pending_renames`: panes we opened during a swap and still need to title
+- `pending_renames`: fallback list of panes we opened during a swap and could not title by id
 - `highlighted_slots`: which grid cells are currently highlighted
 
 **Modes**
@@ -49,7 +49,7 @@ Both use `change_floating_panes_coordinates`, `show_pane_with_id`, and `hide_pan
 | `close-slot N` | close slot N's panes |
 | `rescan` | forget state and re-apply grid mode |
 
-**Live swap and the rename queue.** `swap-slot` calls `open_command_pane_floating` five times with the configured commands and cwd. Zellij titles a new command pane after its command, not after anything we ask for, so the plugin pushes a `PendingRename` per pane. On the next `PaneUpdate`, any pane whose title doesn't start with a known prefix is a candidate; each pending rename is matched to a candidate whose title contains the basename of the command launched for that pane type, and `rename_terminal_pane` stamps the convention name on. This heuristic is the weakest part of the system: if two pane types run the same command (both shells), they're matched in queue order, which is fine because position is reapplied by the next mode switch anyway.
+**Live swap and pane naming.** `swap-slot` calls `open_command_pane_floating` five times with the configured commands and cwd. Zellij titles a new command pane after its command, not after anything we ask for. The call returns the id of the new pane, so the plugin calls `rename_terminal_pane` on that id at once and stamps the convention name on. This is exact, also when several pane types run the same command (for example, three shells). The older `PendingRename` queue stays as a fallback for when Zellij returns no id: on the next `PaneUpdate`, each pending rename is matched to an unrecognised pane whose title contains the basename of the command launched for that pane type.
 
 **Attention highlighting.** A 2-second timer runs `ls /tmp/claude-active/`. Files named `slot-N` mark slots whose Claude has finished a turn. The plugin diffs against `highlighted_slots` and calls `highlight_and_unhighlight_panes`. The files are written by `scripts/workspace-claude-hook` from Claude Code's `Stop` and `UserPromptSubmit` hooks, which resolve the slot from the working directory via projects.json.
 
